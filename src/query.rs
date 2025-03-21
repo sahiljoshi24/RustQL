@@ -1,5 +1,5 @@
 use crate::db::Database;
-use sqlparser::ast::{Expr, Statement, Value};
+use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, Statement, TableFactor, Value, Values};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
@@ -15,31 +15,48 @@ pub fn execute_sql(db: &mut Database, query: &str) -> Result<String, String> {
                 db.create_table(&table_name, col_names);
                 return Ok(format!("Table '{}' created", table_name));
             }
+
             Statement::Insert {
                 table_name, source, ..
             } => {
-                if let Some(Statement::Values(values)) = source.as_ref().map(|v| v.as_ref()) {
-                    let vals: Vec<String> = values.rows[0]
-                        .iter()
-                        .map(|val| match val {
-                            Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
-                            _ => "NULL".to_string(),
-                        })
-                        .collect();
+                if let Query { body, .. } = *source {
+                    if let SetExpr::Values(Values { rows, .. }) = *body {
+                        for row in rows {
+                            let vals: Vec<String> = row
+                                .iter()
+                                .map(|val| match val {
+                                    Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
+                                    Expr::Value(Value::Number(n, _)) => n.clone(), // Handle numbers
+                                    _ => "NULL".to_string(),
+                                })
+                                .collect();
 
-                    db.insert_into(&table_name.to_string(), vals)?;
-                    return Ok("Row inserted".to_string());
-                }
-            }
-            Statement::Query(query) => {
-                if let Some(table) = query.body.as_table() {
-                    let table_name = table.name.to_string();
-                    if let Ok(table_data) = db.select_from(&table_name) {
-                        let result = serde_json::to_string(&table_data).unwrap();
-                        return Ok(result);
+                            db.insert_into(&table_name.to_string(), vals)?;
+                        }
+                        return Ok("Row inserted".to_string());
                     }
                 }
             }
+
+            Statement::Query(query) => {
+                if let SetExpr::Select(select) = &*query.body {
+                    match &select.projection[..] {
+                        [SelectItem::Wildcard(_)] => {
+                            if let Some(from_table) = select.from.first() {
+                                if let TableFactor::Table { name, .. } = &from_table.relation {
+                                    let table_name = name.to_string();
+                                    if let Ok(table_data) = db.select_from(&table_name) {
+                                        let result = serde_json::to_string(&table_data).unwrap();
+                                        return Ok(result);
+                                    }
+                                }
+                            }
+                        }
+                        _ => return Err("Only SELECT * is supported".to_string()),
+                    }
+                }
+            }
+
             _ => return Err("Unsupported query".to_string()),
         }
     }
