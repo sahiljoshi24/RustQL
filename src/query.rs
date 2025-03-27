@@ -1,5 +1,5 @@
 use crate::db::Database;
-use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, Statement, TableFactor, Value, Values};
+use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, Statement, TableFactor, Value, Values, Ident, SetAssignment};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
@@ -26,7 +26,7 @@ pub fn execute_sql(db: &mut Database, query: &str) -> Result<String, String> {
                                 .iter()
                                 .map(|val| match val {
                                     Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
-                                    Expr::Value(Value::Number(n, _)) => n.clone(), // Handle numbers
+                                    Expr::Value(Value::Number(n, _)) => n.clone(),
                                     _ => "NULL".to_string(),
                                 })
                                 .collect();
@@ -54,6 +54,38 @@ pub fn execute_sql(db: &mut Database, query: &str) -> Result<String, String> {
                         }
                         _ => return Err("Only SELECT * is supported".to_string()),
                     }
+
+                    if let Some(where_clause) = &select.selection {
+                        let filtered_rows = db.select_with_condition(&select.from[0].to_string(), where_clause);
+                        match filtered_rows {
+                            Ok(rows) => return Ok(serde_json::to_string(&rows).unwrap()),
+                            Err(err) => return Err(err),
+                        }
+                    }
+                }
+            }
+
+            Statement::Update { table_name, assignments, selection, .. } => {
+                if let Some(selection_expr) = selection {
+                    let updated_rows = db.update_rows(&table_name.to_string(), assignments, selection_expr);
+                    match updated_rows {
+                        Ok(updated_count) => return Ok(format!("{} rows updated", updated_count)),
+                        Err(err) => return Err(err),
+                    }
+                } else {
+                    return Err("No WHERE condition specified for UPDATE".to_string());
+                }
+            }
+
+            Statement::Delete { table_name, selection, .. } => {
+                if let Some(selection_expr) = selection {
+                    let deleted_rows = db.delete_rows(&table_name.to_string(), selection_expr);
+                    match deleted_rows {
+                        Ok(deleted_count) => return Ok(format!("{} rows deleted", deleted_count)),
+                        Err(err) => return Err(err),
+                    }
+                } else {
+                    return Err("No WHERE condition specified for DELETE".to_string());
                 }
             }
 
